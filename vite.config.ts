@@ -32,6 +32,13 @@ export default defineConfig({
     transformer: 'lightningcss',
     lightningcss: { targets: browserslistToTargets(browserslist(BROWSERS)) },
   },
+  // Same CSP as the Tauri app (src-tauri/tauri.conf.json), so e2e tests catch violations.
+  preview: {
+    headers: {
+      'Content-Security-Policy':
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+    },
+  },
   build: {
     // JS syntax is lowered to what Safari 15 / Chromium 105 understand.
     target: ['es2021', 'safari15', 'chrome105', 'firefox115'],

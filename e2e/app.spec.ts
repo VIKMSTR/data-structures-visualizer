@@ -114,3 +114,16 @@ test('keyboard playback and language switch', async ({ page, isMobile }) => {
   await expect(page.getByRole('tab', { name: 'AVL strom' })).toBeVisible();
   await expect(page).toHaveTitle('Vizualizace datových struktur');
 });
+
+test('runs under the strict Content-Security-Policy used by the Tauri app', async ({ page }) => {
+  const violations: string[] = [];
+  page.on('console', (m) => {
+    if (/Content Security Policy|Refused to/i.test(m.text())) violations.push(m.text());
+  });
+  const res = await page.goto('./#avl');
+  expect(res!.headers()['content-security-policy']).toContain("script-src 'self'");
+  await runOp(page, '5, 1', 'Insert');
+  await lastStep(page);
+  await expect(page.locator('.node').first()).toBeVisible();
+  expect(violations).toEqual([]);
+});
