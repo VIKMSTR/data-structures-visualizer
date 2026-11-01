@@ -1,7 +1,8 @@
-import { Recorder, type Cursor, type Marks, type OpResult } from './types';
+import { PACE, Recorder, type Cursor, type Marks, type OpResult } from './types';
 
-export const MIN_VALUE = 0;
-export const MAX_VALUE = 999;
+/** The original accepted any int; the 30 px wide node box fits four characters. */
+export const MIN_VALUE = -999;
+export const MAX_VALUE = 9999;
 
 /** Immutable node as stored in a step snapshot. */
 export interface BNode {
@@ -58,7 +59,7 @@ const cursor = (value: number, at: number | null): Cursor => ({ label: String(va
 export class BinarySearchTree {
   root: TreeNode | null = null;
   protected trackBalance = false;
-  private nextId = 1;
+  protected nextId = 1;
 
   get size(): number {
     let count = 0;
@@ -111,25 +112,22 @@ export class BinarySearchTree {
 
   clear(): OpResult<BTreeState> {
     this.root = null;
+    this.nextId = 1;
     const r = this.recorder();
     r.add('tree.cleared');
     return r.done(true);
   }
 
-  /** Builds a tree from scratch by inserting values one by one; one quick step per value. */
+  /** Preset build ("Vzory"): reset, then insert every value with full animation played at 10x. */
   build(values: number[]): OpResult<BTreeState> {
     this.root = null;
+    this.nextId = 1;
     const r = this.recorder();
-    r.pace = 0.45;
     r.add('build.start', { n: values.length });
+    r.pace = 0.1;
     for (const v of values) {
-      const scratch = this.recorder();
-      if (this.doInsert(v, scratch)) {
-        const n = this.find(v)!;
-        r.add('build.inserted', { value: v }, { [n.id]: 'new' });
-      } else {
-        r.add('build.duplicate', { value: v });
-      }
+      if (this.find(v)) r.add('build.duplicate', { value: v });
+      else this.doInsert(v, r);
     }
     r.pace = 1;
     r.add('build.done', { n: this.size });
@@ -144,78 +142,68 @@ export class BinarySearchTree {
 
   insert(value: number): OpResult<BTreeState> {
     const r = this.recorder();
-    const ok = this.doInsert(value, r);
-    return r.done(ok);
+    if (this.find(value)) return r.fail('errTitle.insert', 'err.duplicate');
+    return r.done(this.doInsert(value, r));
   }
 
   search(value: number): OpResult<BTreeState> {
     const r = this.recorder();
-    if (!this.root) {
-      r.add('search.empty', { value });
-      return r.done(false);
-    }
+    if (!this.root) return r.fail('errTitle.search', 'err.empty');
     const d = this.descend(value, r, 'search.start');
+    // Original: the badge turns LIGHTGREEN / LIGHTPINK on the last node, then drops 50 px.
     if (d.node) {
-      r.add('search.found', { value }, { ...d.path, [d.node.id]: 'found' }, cursor(value, d.node.id));
+      r.add('search.found', { value }, { ...d.path, [d.node.id]: 'found' }, { ...cursor(value, d.node.id), result: 'found', drop: true });
       return r.done(true);
     }
-    this.notFound(value, d, r);
+    r.add(
+      d.goLeft ? 'search.notFoundLeft' : 'search.notFoundRight',
+      { value, node: d.last.value },
+      { ...d.path, [d.last.id]: 'notfound' },
+      { ...cursor(value, d.last.id), result: 'notfound', drop: true },
+    );
     return r.done(false);
   }
 
+  /**
+   * Remove as described in the thesis: an inner node is first swapped with its in-order
+   * successor (leftmost node of the right subtree) — the two nodes visibly trade places —
+   * and is then cut off. A node with only a left child is replaced by that child.
+   */
   remove(value: number): OpResult<BTreeState> {
     const r = this.recorder();
-    if (!this.root) {
-      r.add('remove.empty', { value });
-      return r.done(false);
-    }
+    if (!this.root) return r.fail('errTitle.remove', 'err.empty');
+    if (!this.find(value)) return r.fail('errTitle.remove', 'err.notInTree');
     const d = this.descend(value, r, 'remove.start');
-    const t = d.node;
-    if (!t) {
-      this.notFound(value, d, r);
-      return r.done(false);
-    }
-    const marks: Marks = { ...d.path, [t.id]: 'remove' };
+    const t = d.node!;
+    const path = d.path;
     let retraceFrom: TreeNode | null;
 
-    if (!t.left && !t.right) {
-      r.add('remove.leaf', { value }, marks);
+    if (t.right) {
+      let s = t.right;
+      while (s.left) s = s.left;
+      {
+        r.add('remove.inner', { value, succ: s.value }, { ...path, [t.id]: 'remove', [s.id]: 'moved' }, cursor(value, t.id));
+      }
+      this.swapWithSuccessor(t, s);
+      // The badge stays on the original slot, which the successor now occupies.
+      r.add('remove.swapped', { value, succ: s.value }, { [t.id]: 'remove', [s.id]: 'moved' }, cursor(value, s.id));
       retraceFrom = t.parent;
-      this.replace(t, null);
-      r.add('remove.done', { value });
-    } else if (!t.left || !t.right) {
-      const child = (t.left ?? t.right)!;
-      r.add('remove.oneChild', { value, child: child.value }, { ...marks, [child.id]: 'moved' });
+      const child = t.right;
+      this.replace(t, child);
+      r.add(child ? 'remove.doneSpliced' : 'remove.done', { value, child: child ? child.value : '' }, child ? { [child.id]: 'moved' } : {}, undefined, {
+        pace: PACE.fade + PACE.shift,
+      });
+    } else if (t.left) {
+      const child = t.left;
+      r.add('remove.leftOnly', { value, child: child.value }, { ...path, [t.id]: 'remove', [child.id]: 'moved' }, cursor(value, t.id));
       retraceFrom = t.parent;
       this.replace(t, child);
-      r.add('remove.done', { value }, { [child.id]: 'moved' });
+      r.add('remove.done', { value }, { [child.id]: 'moved' }, undefined, { pace: PACE.fade + PACE.shift });
     } else {
-      r.add('remove.twoChildren', { value }, marks);
-      let p = t.left;
-      const pm: Marks = { ...marks };
-      r.add('pred.start', { node: p.value }, { ...pm, [p.id]: 'current' });
-      while (p.right) {
-        pm[p.id] = 'path';
-        p = p.right;
-        r.add('pred.right', { node: p.value }, { ...pm, [p.id]: 'current' });
-      }
-      r.add('pred.found', { pred: p.value, value }, { ...pm, [p.id]: 'moved' });
-
-      if (p.parent === t) {
-        // Predecessor is the direct left child: it keeps its left subtree.
-        retraceFrom = p;
-      } else {
-        retraceFrom = p.parent;
-        this.replace(p, p.left);
-        p.left = t.left;
-        p.left.parent = p;
-      }
-      p.right = t.right;
-      p.right.parent = p;
-      // p now occupies t's position; inherit its height so retracing compares correctly.
-      p.height = t.height;
-      this.replace(t, p);
-      r.add('remove.replaced', { value, pred: p.value }, { [p.id]: 'moved' });
+      r.add('remove.leaf', { value }, { ...path, [t.id]: 'remove' }, cursor(value, t.id));
+      retraceFrom = t.parent;
+      this.replace(t, null);
+      r.add('remove.done', { value }, {}, undefined, { pace: PACE.fade + PACE.shift });
     }
     this.afterRemove(retraceFrom, r);
     return r.done(true);
@@ -251,10 +239,13 @@ export class BinarySearchTree {
     n.parent = d.last;
     if (d.goLeft) d.last.left = n;
     else d.last.right = n;
+    // Original: neighbours shift aside (400 ms), the badge vanishes and the new node fades in (200 ms).
     r.add(
       d.goLeft ? 'insert.asLeft' : 'insert.asRight',
       { value, node: d.last.value },
       { ...d.path, [d.last.id]: 'path', [n.id]: 'new' },
+      undefined,
+      { pace: PACE.shift + PACE.fade },
     );
     this.afterInsert(n, r);
     return true;
@@ -281,17 +272,35 @@ export class BinarySearchTree {
     }
   }
 
-  private notFound(value: number, d: DescendResult, r: Recorder<BTreeState>): void {
-    r.add(
-      d.goLeft ? 'search.notFoundLeft' : 'search.notFoundRight',
-      { value, node: d.last.value },
-      { ...d.path, [d.last.id]: 'notfound' },
-      cursor(value, d.last.id),
-    );
-  }
-
   private newNode(value: number): TreeNode {
     return new TreeNode(this.nextId++, value);
+  }
+
+  /** Swaps node `t` with its in-order successor `s` (s has no left child and lies in t's right subtree). */
+  private swapWithSuccessor(t: TreeNode, s: TreeNode): void {
+    const tLeft = t.left;
+    const tRight = t.right;
+    const sParent = s.parent;
+    const sRight = s.right;
+    this.replace(t, s);
+    s.left = tLeft;
+    if (tLeft) tLeft.parent = s;
+    if (sParent === t) {
+      s.right = t;
+      t.parent = s;
+    } else {
+      s.right = tRight;
+      tRight!.parent = s;
+      sParent!.left = t;
+      t.parent = sParent;
+    }
+    t.left = null;
+    t.right = sRight;
+    if (sRight) sRight.parent = t;
+    // Heights belong to positions; swap them so AVL retracing sees the old values.
+    const h = t.height;
+    t.height = s.height;
+    s.height = h;
   }
 
   /** Puts `replacement` where `old` hangs in the tree (parent link or root). */

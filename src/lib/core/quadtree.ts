@@ -1,9 +1,13 @@
 import { Recorder, type Cursor, type Marks, type OpResult } from './types';
 
-/** The plane is [0, PLANE) x [0, PLANE); points have integer coordinates 0..PLANE-1. */
+/** The plane is [0, PLANE] x [0, PLANE] (inclusive, as in the original); coordinates may be decimals. */
 export const PLANE = 100;
-/** Two distinct integer points always separate before cells get smaller than 1. */
-export const MAX_DEPTH = 8;
+/** The original has no limit; points closer than ~0.0001 would split forever. */
+export const MAX_DEPTH = 20;
+
+/** Java-style double formatting used by the original labels: 60 -> "60.0", 12.5 -> "12.5". */
+export const fmtCoord = (v: number): string => (Number.isInteger(v) ? v.toFixed(1) : String(Math.round(v * 1e6) / 1e6));
+export const fmtPoint = (x: number, y: number): string => `[${fmtCoord(x)},${fmtCoord(y)}]`;
 export const QUADRANTS = ['NW', 'NE', 'SW', 'SE'] as const;
 export type Quadrant = (typeof QUADRANTS)[number];
 
@@ -58,10 +62,10 @@ class Cell {
   }
 }
 
-const cursor = (x: number, y: number, at: number): Cursor => ({ label: `(${x}, ${y})`, at, x, y });
+const cursor = (x: number, y: number, at: number): Cursor => ({ label: fmtPoint(x, y), at, x, y });
 const quadrantParam = (q: number): string => `@q.${QUADRANTS[q]}`;
 
-export const isValidCoord = (v: number): boolean => Number.isInteger(v) && v >= 0 && v < PLANE;
+export const isValidCoord = (v: number): boolean => Number.isFinite(v) && v >= 0 && v <= PLANE;
 
 /**
  * Point-region quadtree with one point per leaf. Unlike the original thesis code
@@ -111,43 +115,68 @@ export class QuadTree {
   }
 
   clear(): OpResult<QState> {
+    this.nextId = 1;
     this.root = this.newCell(0, 0, PLANE, 0, null);
     const r = this.recorder();
     r.add('quad.cleared');
     return r.done(true);
   }
 
+  /** Preset build ("Vzory"): reset, then insert every point with its full animation. */
   build(points: Array<[number, number]>): OpResult<QState> {
+    this.nextId = 1;
     this.root = this.newCell(0, 0, PLANE, 0, null);
     const r = this.recorder();
-    r.pace = 0.45;
     r.add('quad.build.start', { n: points.length });
     for (const [x, y] of points) {
-      const scratch = this.recorder();
-      if (this.doInsert(x, y, scratch)) {
-        const leaf = this.leafFor(x, y);
-        r.add('quad.build.inserted', { x, y }, { [leaf.id]: 'new', [leaf.point!.id]: 'new' });
-      } else {
-        r.add('quad.build.duplicate', { x, y });
-      }
+      if (this.has(x, y)) r.add('quad.build.duplicate', { x: fmtCoord(x), y: fmtCoord(y) });
+      else this.doInsert(x, y, r);
     }
-    r.pace = 1;
     r.add('quad.build.done', { n: this.size });
     return r.done(true);
   }
 
   insert(x: number, y: number): OpResult<QState> {
     const r = this.recorder();
+    if (!isValidCoord(x) || !isValidCoord(y)) return r.fail('errTitle.insert', 'err.range');
+    if (this.has(x, y)) return r.fail('errTitle.insert', 'err.duplicate');
+    if (this.depthNeeded(x, y) > MAX_DEPTH) return r.fail('errTitle.insert', 'err.tooClose');
     return r.done(this.doInsert(x, y, r));
+  }
+
+  has(x: number, y: number): boolean {
+    const p = this.leafFor(x, y).point;
+    return !!p && p.x === x && p.y === y;
+  }
+
+  /** Depth at which (x, y) would separate from the point currently in its leaf. */
+  private depthNeeded(x: number, y: number): number {
+    let c = this.leafFor(x, y);
+    const p = c.point;
+    if (!p) return c.depth;
+    let { depth } = c;
+    let cx = c.x;
+    let cy = c.y;
+    let size = c.size;
+    for (;;) {
+      const h = size / 2;
+      const qa = (p.y >= cy + h ? 0 : 2) + (p.x >= cx + h ? 1 : 0);
+      const qb = (y >= cy + h ? 0 : 2) + (x >= cx + h ? 1 : 0);
+      depth++;
+      if (qa !== qb || depth > MAX_DEPTH) return depth;
+      if (qb & 1) cx += h;
+      if (!(qb & 2)) cy += h;
+      size = h;
+    }
   }
 
   search(x: number, y: number): OpResult<QState> {
     const r = this.recorder();
-    if (!this.checkCoords(x, y, r)) return r.done(false);
+    if (!isValidCoord(x) || !isValidCoord(y)) return r.fail('errTitle.search', 'err.range');
     const { leaf, path } = this.descend(x, y, r, 'quad.search.start');
     const p = leaf.point;
     if (p && p.x === x && p.y === y) {
-      r.add('quad.found', { x, y }, { ...path, [leaf.id]: 'found', [p.id]: 'found' }, cursor(x, y, leaf.id));
+      r.add('quad.found', { x: fmtCoord(x), y: fmtCoord(y) }, { ...path, [leaf.id]: 'found', [p.id]: 'found' }, { ...cursor(x, y, leaf.id), result: 'found' });
       return r.done(true);
     }
     this.notFound(x, y, leaf, path, r);
@@ -156,16 +185,13 @@ export class QuadTree {
 
   remove(x: number, y: number): OpResult<QState> {
     const r = this.recorder();
-    if (!this.checkCoords(x, y, r)) return r.done(false);
+    if (!isValidCoord(x) || !isValidCoord(y)) return r.fail('errTitle.remove', 'err.range');
+    if (!this.has(x, y)) return r.fail('errTitle.remove', 'err.notInTree');
     const { leaf, path } = this.descend(x, y, r, 'quad.remove.start');
-    const p = leaf.point;
-    if (!p || p.x !== x || p.y !== y) {
-      this.notFound(x, y, leaf, path, r);
-      return r.done(false);
-    }
-    r.add('quad.remove.found', { x, y }, { ...path, [leaf.id]: 'remove', [p.id]: 'remove' });
+    const p = leaf.point!;
+    r.add('quad.remove.found', { x: fmtCoord(x), y: fmtCoord(y) }, { ...path, [leaf.id]: 'remove', [p.id]: 'remove' });
     leaf.point = null;
-    r.add('quad.removed', { x, y }, { [leaf.id]: 'current' });
+    r.add('quad.removed', { x: fmtCoord(x), y: fmtCoord(y) }, { [leaf.id]: 'current' });
 
     // Collapse parents whose four quadrants together hold at most one point.
     for (let c = leaf.parent; c; c = c.parent) {
@@ -184,27 +210,25 @@ export class QuadTree {
   // ---- helpers ---------------------------------------------------------------
 
   private doInsert(x: number, y: number, r: Recorder<QState>): boolean {
-    if (!this.checkCoords(x, y, r)) return false;
     let { leaf, path } = this.descend(x, y, r, 'quad.insert.start');
     for (;;) {
       const existing = leaf.point;
       if (!existing) {
         leaf.point = { id: this.nextId++, x, y };
-        r.add('quad.insert.empty', { x, y }, { ...path, [leaf.id]: 'new', [leaf.point.id]: 'new' });
+        r.add('quad.insert.empty', { x: fmtCoord(x), y: fmtCoord(y) }, { ...path, [leaf.id]: 'new', [leaf.point.id]: 'new' });
         return true;
       }
       if (existing.x === x && existing.y === y) {
-        r.add('quad.duplicate', { x, y }, { ...path, [leaf.id]: 'found', [existing.id]: 'found' }, cursor(x, y, leaf.id));
+        r.add('quad.duplicate', { x: fmtCoord(x), y: fmtCoord(y) }, { ...path, [leaf.id]: 'found', [existing.id]: 'found' }, cursor(x, y, leaf.id));
         return false;
       }
-      if (leaf.depth >= MAX_DEPTH) throw new Error('Quadtree depth limit reached');
-
-      r.add('quad.occupied', { ox: existing.x, oy: existing.y }, { ...path, [leaf.id]: 'current', [existing.id]: 'moved' }, cursor(x, y, leaf.id));
+      
+      r.add('quad.occupied', { ox: fmtCoord(existing.x), oy: fmtCoord(existing.y) }, { ...path, [leaf.id]: 'current', [existing.id]: 'moved' }, cursor(x, y, leaf.id));
       this.split(leaf);
       const q = leaf.quadrantOf(existing.x, existing.y);
       r.add(
         'quad.split',
-        { ox: existing.x, oy: existing.y, q: quadrantParam(q) },
+        { ox: fmtCoord(existing.x), oy: fmtCoord(existing.y), q: quadrantParam(q) },
         { ...path, [leaf.id]: 'current', [leaf.children![q].id]: 'moved', [existing.id]: 'moved' },
         cursor(x, y, leaf.id),
       );
@@ -212,7 +236,7 @@ export class QuadTree {
       const qi = leaf.quadrantOf(x, y);
       const next = leaf.children![qi];
       path[leaf.id] = 'path';
-      r.add('quad.descend', { x, y, q: quadrantParam(qi) }, { ...path, [next.id]: 'current' }, cursor(x, y, next.id));
+      r.add('quad.descend', { x: fmtCoord(x), y: fmtCoord(y), q: quadrantParam(qi) }, { ...path, [next.id]: 'current' }, cursor(x, y, next.id));
       leaf = next;
     }
   }
@@ -220,12 +244,12 @@ export class QuadTree {
   private descend(x: number, y: number, r: Recorder<QState>, startKey: string): { leaf: Cell; path: Marks } {
     let c = this.root;
     const path: Marks = {};
-    r.add(startKey, { x, y }, { [c.id]: 'current' }, cursor(x, y, c.id));
+    r.add(startKey, { x: fmtCoord(x), y: fmtCoord(y) }, { [c.id]: 'current' }, cursor(x, y, c.id));
     while (c.children) {
       const q = c.quadrantOf(x, y);
       const next = c.children[q];
       path[c.id] = 'path';
-      r.add('quad.descend', { x, y, q: quadrantParam(q) }, { ...path, [next.id]: 'current' }, cursor(x, y, next.id));
+      r.add('quad.descend', { x: fmtCoord(x), y: fmtCoord(y), q: quadrantParam(q) }, { ...path, [next.id]: 'current' }, cursor(x, y, next.id));
       c = next;
     }
     return { leaf: c, path };
@@ -234,16 +258,10 @@ export class QuadTree {
   private notFound(x: number, y: number, leaf: Cell, path: Marks, r: Recorder<QState>): void {
     const p = leaf.point;
     if (p) {
-      r.add('quad.notFoundOther', { x, y, ox: p.x, oy: p.y }, { ...path, [leaf.id]: 'notfound' }, cursor(x, y, leaf.id));
+      r.add('quad.notFoundOther', { x: fmtCoord(x), y: fmtCoord(y), ox: fmtCoord(p.x), oy: fmtCoord(p.y) }, { ...path, [leaf.id]: 'notfound' }, { ...cursor(x, y, leaf.id), result: 'notfound' });
     } else {
-      r.add('quad.notFoundEmpty', { x, y }, { ...path, [leaf.id]: 'notfound' }, cursor(x, y, leaf.id));
+      r.add('quad.notFoundEmpty', { x: fmtCoord(x), y: fmtCoord(y) }, { ...path, [leaf.id]: 'notfound' }, { ...cursor(x, y, leaf.id), result: 'notfound' });
     }
-  }
-
-  private checkCoords(x: number, y: number, r: Recorder<QState>): boolean {
-    if (isValidCoord(x) && isValidCoord(y)) return true;
-    r.add('quad.outOfRange', { max: PLANE - 1 });
-    return false;
   }
 
   private split(c: Cell): void {

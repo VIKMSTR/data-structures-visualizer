@@ -1,9 +1,8 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import type { BTreeState } from '../core/bst';
-  import { fmtBalance } from '../core/bst';
   import { binaryLayout, boundsOf } from '../core/layout';
-  import type { Mark, Step } from '../core/types';
+  import type { Step } from '../core/types';
   import { t } from '../i18n/index.svelte';
   import { Tween, type Target } from '../tween.svelte';
   import Viewport from './Viewport.svelte';
@@ -12,20 +11,25 @@
     step: Step<BTreeState> | undefined;
     tweenMs: number;
     fitKey: unknown;
-    showBalance?: boolean;
   }
-  let { step, tweenMs, fitKey, showBalance = false }: Props = $props();
+  let { step, tweenMs, fitKey }: Props = $props();
 
-  const R = 20;
-  type NodeData = { kind: 'node'; value: number; bal?: number; mark?: Mark; parent: string | null };
-  type CursorData = { kind: 'cursor'; label: string };
-  type Data = NodeData | CursorData;
+  /** Original BSTNodeWithLine / AVLNodeWithLine: 30x15, yellow, black 1 px inner border. */
+  const W = 30;
+  const H = 15;
+  /** The search badge drops 50 px below the last node (original SearchFinishedEvent). */
+  const DROP = 50;
+
+  type Data =
+    | { kind: 'node'; value: number; parent: string | null; left: boolean }
+    | { kind: 'cursor'; label: string; result?: 'found' | 'notfound' }
+    | { kind: 'arrow'; dir: 'left' | 'right' };
 
   const tween = new Tween<Data>();
   onDestroy(() => tween.destroy());
 
   const layout = $derived(step ? binaryLayout(step.state) : new Map<number, { x: number; y: number }>());
-  const bounds = $derived(boundsOf(layout.values(), R + 34));
+  const bounds = $derived(boundsOf(layout.values(), 40));
 
   $effect(() => {
     if (!step) return;
@@ -33,138 +37,95 @@
     const targets = new Map<string, Target<Data>>();
     layout.forEach((p, id) => {
       const n = s.state.nodes[id];
+      const parent = n.parent == null ? null : s.state.nodes[n.parent];
       targets.set('n' + id, {
         x: p.x,
         y: p.y,
-        data: { kind: 'node', value: n.value, bal: n.bal, mark: s.marks[id], parent: n.parent == null ? null : 'n' + n.parent },
+        data: { kind: 'node', value: n.value, parent: parent ? 'n' + parent.id : null, left: !!parent && parent.left === id },
       });
     });
-    if (s.cursor) {
-      const at = s.cursor.at != null ? layout.get(s.cursor.at) : undefined;
+    const c = s.cursor;
+    if (c) {
+      const at = c.at != null ? layout.get(c.at) : undefined;
       const base = at ?? { x: 0, y: 0 };
-      targets.set('cursor', { x: base.x + 26, y: base.y - 30, data: { kind: 'cursor', label: s.cursor.label } });
+      // Like the original moving node, the badge flies in from the top-left corner of the drawing.
+      targets.set('cursor', {
+        x: base.x,
+        y: base.y + (c.drop ? DROP : 0),
+        data: { kind: 'cursor', label: c.label, result: c.result },
+        from: { x: bounds.x - 20, y: bounds.y - 20 },
+      });
     }
-    // untrack: set() reads the current sprites; tracking them would restart the tween every frame.
+    if (s.arrow) {
+      const p = layout.get(s.arrow.at);
+      if (p) targets.set('arrow' + s.arrow.at, { x: p.x, y: p.y, data: { kind: 'arrow', dir: s.arrow.dir } });
+    }
     untrack(() => tween.set(targets, tweenMs));
   });
 
   const sprites = $derived(Array.from(tween.sprites));
-  const balClass = (b: number) => (Math.abs(b) >= 2 ? 'bad' : b === 0 ? 'zero' : 'ok');
 </script>
 
-<Viewport {bounds} {fitKey} label={t('ui.treeCanvas')}>
+<Viewport {bounds} {fitKey} maxFitZoom={1.6} label={t('ui.canvas')}>
   <g class="edges">
     {#each sprites as [key, s] (key)}
       {#if s.data.kind === 'node' && s.data.parent}
         {@const p = tween.sprites.get(s.data.parent)}
         {#if p}
-          <line x1={p.x} y1={p.y} x2={s.x} y2={s.y} opacity={Math.min(s.o, p.o)} />
+          <!-- parent's bottom-left / bottom-right corner -> child's top-centre (+1 px) -->
+          <line x1={p.x + (s.data.left ? -W / 2 : W / 2)} y1={p.y + H / 2} x2={s.x} y2={s.y - H / 2 + 1} opacity={Math.min(s.o, p.o)} />
         {/if}
       {/if}
     {/each}
   </g>
-  <g class="nodes">
-    {#each sprites as [key, s] (key)}
-      {#if s.data.kind === 'node'}
-        <g class="node" data-mark={s.data.mark ?? 'none'} transform="translate({s.x} {s.y})" opacity={s.o}>
-          <circle r={R} />
-          <text dy="0.35em">{s.data.value}</text>
-          {#if showBalance && s.data.bal != null}
-            <g class="bal {balClass(s.data.bal)}" transform="translate({R - 2} {-R + 2})">
-              <circle r="10" />
-              <text dy="0.35em">{fmtBalance(s.data.bal)}</text>
-            </g>
-          {/if}
-        </g>
-      {:else}
-        <g class="cursor" transform="translate({s.x} {s.y})" opacity={s.o}>
-          <rect x={-14 - s.data.label.length * 4} y="-13" width={28 + s.data.label.length * 8} height="26" rx="13" />
-          <text dy="0.35em">{s.data.label}</text>
-        </g>
-      {/if}
-    {/each}
-  </g>
+  {#each sprites as [key, s] (key)}
+    {#if s.data.kind === 'node'}
+      <g class="node" transform="translate({s.x} {s.y})" opacity={s.o}>
+        <rect x={-W / 2 + 0.5} y={-H / 2 + 0.5} width={W - 1} height={H - 1} />
+        <text dy="0.35em">{s.data.value}</text>
+      </g>
+    {:else if s.data.kind === 'arrow'}
+      <!-- Original RotationDirectionElement: arc under the node with an L-shaped tip -->
+      <g class="arrow" transform="translate({s.x - W / 2} {s.y + H / 2})" opacity={s.o}>
+        <path d="M0 15 Q15 0 30 15" />
+        <path d={s.data.dir === 'left' ? 'M0 5 L0 15 L10 15' : 'M20 15 L30 15 L30 5'} />
+      </g>
+    {/if}
+  {/each}
+  {#each sprites as [key, s] (key)}
+    {#if s.data.kind === 'cursor'}
+      <g class="node cursor" data-result={s.data.result ?? 'none'} transform="translate({s.x} {s.y})" opacity={s.o}>
+        <rect x={-W / 2 + 0.5} y={-H / 2 + 0.5} width={W - 1} height={H - 1} />
+        <text dy="0.35em">{s.data.label}</text>
+      </g>
+    {/if}
+  {/each}
 </Viewport>
 
 <style>
   line {
-    stroke: var(--edge);
-    stroke-width: 2;
+    stroke: #000;
+    stroke-width: 1;
   }
-  .node circle {
-    fill: var(--node-bg);
-    stroke: var(--node-stroke);
-    stroke-width: 2;
+  .node rect {
+    fill: #ffff00;
+    stroke: #000;
+    stroke-width: 1;
   }
-  .node text,
-  .cursor text,
-  .bal text {
+  .node text {
     text-anchor: middle;
-    font-size: 14px;
-    font-weight: 600;
-    fill: var(--fg);
-    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    fill: #000;
   }
-  .node[data-mark='current'] circle {
-    stroke: var(--m-current);
-    stroke-width: 4;
+  .cursor[data-result='found'] rect {
+    fill: #90ee90;
   }
-  .node[data-mark='path'] circle {
-    fill: var(--m-path-bg);
+  .cursor[data-result='notfound'] rect {
+    fill: #ffb6c1;
   }
-  .node[data-mark='found'] circle {
-    fill: var(--m-found);
-    stroke: var(--m-found);
-  }
-  .node[data-mark='new'] circle {
-    fill: var(--m-new);
-    stroke: var(--m-new);
-  }
-  .node[data-mark='remove'] circle,
-  .node[data-mark='imbalanced'] circle {
-    fill: var(--m-bad);
-    stroke: var(--m-bad);
-  }
-  .node[data-mark='notfound'] circle {
-    stroke: var(--m-bad);
-    stroke-width: 4;
-    stroke-dasharray: 5 4;
-  }
-  .node[data-mark='pivot'] circle {
-    fill: var(--m-pivot);
-    stroke: var(--m-pivot);
-  }
-  .node[data-mark='moved'] circle {
-    stroke: var(--m-pivot);
-    stroke-width: 4;
-  }
-  .node[data-mark='found'] > text,
-  .node[data-mark='new'] > text,
-  .node[data-mark='remove'] > text,
-  .node[data-mark='imbalanced'] > text,
-  .node[data-mark='pivot'] > text {
-    fill: #fff;
-  }
-  .bal circle {
-    fill: var(--bg);
-    stroke: var(--muted);
-    stroke-width: 1.5;
-  }
-  .bal text {
-    font-size: 10px;
-    fill: var(--muted);
-  }
-  .bal.bad circle {
-    fill: var(--m-bad);
-    stroke: var(--m-bad);
-  }
-  .bal.bad text {
-    fill: #fff;
-  }
-  .cursor rect {
-    fill: var(--m-current);
-  }
-  .cursor text {
-    fill: #1b1300;
+  .arrow path {
+    fill: none;
+    stroke: #000;
+    stroke-width: 1;
   }
 </style>

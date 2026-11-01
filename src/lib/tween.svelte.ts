@@ -9,9 +9,12 @@ export interface Target<T> {
   x: number;
   y: number;
   data: T;
+  /** Where an entering sprite starts (default: fade in at its target). */
+  from?: { x: number; y: number };
 }
 
-const ease = (t: number): number => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+/** JavaFX Interpolator.EASE_BOTH, used by every transition of the original. */
+const ease = (t: number): number => (t < 0.2 ? 3.125 * t * t : t > 0.8 ? -3.125 * t * t + 6.25 * t - 2.125 : 1.25 * t - 0.125);
 
 /**
  * Animates keyed sprites between layouts with requestAnimationFrame.
@@ -29,7 +32,7 @@ export class Tween<T> {
     const end = new Map<string, Sprite<T>>();
     targets.forEach((t, k) => {
       const f = from.get(k);
-      start.set(k, f ? { x: f.x, y: f.y, o: f.o, data: t.data } : { x: t.x, y: t.y, o: 0, data: t.data });
+      start.set(k, f ? { x: f.x, y: f.y, o: f.o, data: t.data } : t.from ? { x: t.from.x, y: t.from.y, o: 1, data: t.data } : { x: t.x, y: t.y, o: 0, data: t.data });
       end.set(k, { x: t.x, y: t.y, o: 1, data: t.data });
     });
     from.forEach((f, k) => {

@@ -41,6 +41,26 @@ describe('AVLTree', () => {
     expect(keys(r2)).toContain('avl.stop');
   });
 
+  // Spec trace (avl.md): "remove 5 then 15" from [20,10,30,5,15,25,40,35] -> single left rotation at the root.
+  it('original trace: remove 5 then 15 rotates left at the root', () => {
+    const t = new AVLTree();
+    t.build([20, 10, 30, 5, 15, 25, 40, 35]);
+    t.remove(5);
+    const r = t.remove(15);
+    expect(r.steps.some((s) => s.arrow && s.arrow.dir === 'left')).toBe(true);
+    expect(t.root!.value).toBe(30);
+    checkTree(t, true);
+  });
+
+  it('removing a node whose only child is on the right (crashes in the original) works', () => {
+    const t = new AVLTree();
+    t.build([20, 10, 30, 5, 15, 25, 40, 35]);
+    t.remove(5);
+    expect(t.remove(10).ok).toBe(true);
+    checkTree(t, true);
+    expect(t.values()).toEqual([15, 20, 25, 30, 35, 40]);
+  });
+
   it('rebalances after removals, including the root', () => {
     const t = new AVLTree();
     t.build([50, 30, 70, 20, 40, 60, 80, 10]);

@@ -1,7 +1,9 @@
 # Data Structure Visualizer
 
-Step-by-step animations of **binary search tree**, **AVL tree** and **quadtree** operations —
-a rewrite of a 2014 Java/JavaFX master-thesis project (originally deployed as an applet).
+Step-by-step animations of **binary search tree**, **AVL tree**, **2-3 tree** and **quadtree** operations —
+a port of the 2015 Java/JavaFX master-thesis applications (originally deployed as applets), keeping their
+look, controls and texts. See [docs/PORTING.md](docs/PORTING.md) for what was kept, fixed and added, and
+[docs/original/](docs/original/) for detailed specs of the original apps.
 
 Runs in the browser, and as a desktop/mobile app through [Tauri 2](https://tauri.app).
 
@@ -26,11 +28,12 @@ That replaces the original `EventQueue` + hand-built JavaFX transitions, and mak
 stepping backwards trivial.
 
 ```
-src/lib/core/      bst.ts, avl.ts, quadtree.ts, layout.ts, types.ts (Step/Recorder) + *.test.ts
-src/lib/i18n/      en.ts, cs.ts
-src/lib/player.svelte.ts   playback state (play/pause/step/seek/speed)
-src/lib/tween.svelte.ts    rAF-based tweening of keyed sprites
-src/lib/ui/        Viewport (pan/zoom/pinch), TreeCanvas, QuadPlane, QuadDiagram, panels
+src/lib/core/      bst.ts, avl.ts, twothree.ts, quadtree.ts, layout.ts, types.ts (Step/Recorder) + *.test.ts
+src/lib/i18n/      cs.ts (original Czech texts), en.ts
+src/lib/player.svelte.ts   playback with the original semantics (Krokovat, <<, >>, Play/Pause, rate)
+src/lib/tween.svelte.ts    rAF-based tweening of keyed sprites (JavaFX EASE_BOTH easing)
+src/lib/ui/        Toolbar, Dialogs (error/help/presets), Description, Viewport (pan/zoom/pinch),
+                   TreeCanvas, TwoThreeCanvas, QuadPlane, QuadDiagram, IntPage, QuadPage
 src-tauri/         native shell (no custom Rust code needed)
 ```
 
@@ -78,5 +81,4 @@ Guards in place:
 - **npm 10.9.x** hits an arborist bug (`Cannot read properties of null (reading 'edgesOut')`) when *adding*
   some packages; `npm ci` from the lockfile works. Add new deps with `--legacy-peer-deps` or use npm 11.
 - The Tauri `identifier` (`cz.vkrejcir.dsvisualizer`) is a placeholder — change it before publishing.
-- Differences from the original Java code: AVL removal is rewritten (the original mishandled the root),
-  and the quadtree merges empty quadrants after removal.
+- Behavioural differences from the original Java code are listed in [docs/PORTING.md](docs/PORTING.md).

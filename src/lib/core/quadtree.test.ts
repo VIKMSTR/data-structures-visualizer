@@ -14,7 +14,10 @@ function checkQuad(s: QState) {
       }
     } else if (n.point) {
       const { x, y } = n.point;
-      expect(x >= n.x && x < n.x + n.size && y >= n.y && y < n.y + n.size).toBe(true);
+      // Half-open cells, except that cells on the outer edge also include the bound 100.
+      const inX = x >= n.x && (x < n.x + n.size || (x === 100 && n.x + n.size === 100));
+      const inY = y >= n.y && (y < n.y + n.size || (y === 100 && n.y + n.size === 100));
+      expect(inX && inY).toBe(true);
     }
   }
 }
@@ -47,12 +50,45 @@ describe('QuadTree', () => {
     expect(last.msg.params!.q).toBe('@q.NE');
   });
 
-  it('rejects duplicates and out-of-range points', () => {
+  it('rejects duplicates and out-of-range points with the original dialogs (no animation)', () => {
     const q = new QuadTree();
     q.insert(5, 5);
-    expect(q.insert(5, 5).ok).toBe(false);
-    expect(q.insert(100, 5).ok).toBe(false);
-    expect(q.insert(-1, 5).ok).toBe(false);
+    const dup = q.insert(5, 5);
+    expect(dup.error!.msg.key).toBe('err.duplicate');
+    expect(dup.steps).toHaveLength(0);
+    expect(q.insert(100.5, 5).error!.msg.key).toBe('err.range');
+    expect(q.insert(-1, 5).error!.msg.key).toBe('err.range');
+    expect(q.remove(1, 1).error!.msg.key).toBe('err.notInTree');
+  });
+
+  it('accepts the inclusive bounds 0..100 and decimals', () => {
+    const q = new QuadTree();
+    for (const [x, y] of [[0, 0], [100, 100], [0, 100], [12.5, 37.25]]) expect(q.insert(x, y).ok).toBe(true);
+    expect(q.search(12.5, 37.25).ok).toBe(true);
+    checkQuad(q.snapshot());
+  });
+
+  it('boundary rule: a point on a split line goes East / North', () => {
+    const q = new QuadTree();
+    q.insert(10, 10);
+    const r = q.insert(50, 50);
+    const desc = r.steps.filter((s) => s.msg.key === 'quad.descend').map((s) => s.msg.params!.q);
+    expect(desc[desc.length - 1]).toBe('@q.NE');
+  });
+
+  it('refuses points too close to separate', () => {
+    const q = new QuadTree();
+    q.insert(10, 10);
+    expect(q.insert(10, 10.0000001).error!.msg.key).toBe('err.tooClose');
+    expect(q.insert(10, 10.01).ok).toBe(true);
+    checkQuad(q.snapshot());
+  });
+
+  it('formats coordinates like the original (Java doubles)', () => {
+    const q = new QuadTree();
+    const r = q.insert(60, 40);
+    expect(r.steps[0].cursor!.label).toBe('[60.0,40.0]');
+    expect(r.steps[0].msg.params).toMatchObject({ x: '60.0', y: '40.0' });
   });
 
   it('searches', () => {
