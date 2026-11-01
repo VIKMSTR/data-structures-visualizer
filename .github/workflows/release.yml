@@ -1,0 +1,222 @@
+name: Release
+
+# Push a tag like v1.2.3 to build everything and publish a GitHub Release.
+# Run manually (Actions → Release → Run workflow) for a dry run: same builds,
+# uploaded as workflow artifacts, no release created.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
+jobs:
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          prerelease=false
+          [[ "$TAG" == *-* ]] && prerelease=true
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$TAG" -f name="DS Visualizer $TAG" \
+            -F draft=true -F prerelease=$prerelease -F generate_release_notes=true \
+            -q .id)
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+
+  web:
+    needs: create-release
+    if: ${{ !cancelled() && needs.create-release.result != 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$IS_RELEASE" == true ]] || version="dev-${GITHUB_SHA::7}"
+          echo "ZIP=ds-visualizer-web-$version.zip" >> "$GITHUB_ENV"
+          (cd dist && zip -qr "../ds-visualizer-web-$version.zip" .)
+      - if: env.IS_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
+      - if: env.IS_RELEASE != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: web
+          path: ${{ env.ZIP }}
+
+  desktop:
+    needs: create-release
+    if: ${{ !cancelled() && needs.create-release.result != 'failure' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-universal
+            runner: macos-latest
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin
+          - name: windows-x64
+            runner: windows-latest
+            rust-targets: ''
+            args: ''
+          - name: windows-arm64
+            # Cross-compiled; WiX (.msi) can't target ARM64, so NSIS only.
+            runner: windows-latest
+            rust-targets: aarch64-pc-windows-msvc
+            args: --target aarch64-pc-windows-msvc --bundles nsis
+          - name: linux-x64
+            runner: ubuntu-24.04
+            rust-targets: ''
+            args: ''
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            rust-targets: ''
+            args: ''
+    name: desktop (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf file
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.name }}
+
+      - run: npm ci
+
+      - name: Set app version from tag
+        if: env.IS_RELEASE == 'true'
+        shell: bash
+        run: node scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.args }}
+          uploadWorkflowArtifacts: ${{ env.IS_RELEASE != 'true' }}
+          workflowArtifactNamePattern: desktop-${{ matrix.name }}-[bundle]
+
+  android:
+    needs: create-release
+    if: ${{ !cancelled() && needs.create-release.result != 'failure' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: android
+
+      - run: npm ci
+
+      - name: Set app version from tag
+        if: env.IS_RELEASE == 'true'
+        run: node scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
+
+      - name: Build APK
+        run: |
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          npm run tauri android init -- --ci
+          npm run tauri android build -- --ci --apk
+
+      - name: Sign APK
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [[ -n "$KEYSTORE_B64" ]]; then
+            echo "$KEYSTORE_B64" | base64 -d > release.jks
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 secret not set; signing with a throwaway key. Users must uninstall before installing a later build."
+            KEYSTORE_PASSWORD=throwaway KEY_ALIAS=throwaway
+            keytool -genkeypair -keystore release.jks -storepass "$KEYSTORE_PASSWORD" \
+              -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=DS Visualizer CI"
+          fi
+          tools="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          unsigned=$(find src-tauri/gen/android/app/build/outputs/apk -name '*-release-unsigned.apk' | head -1)
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$IS_RELEASE" == true ]] || version="dev-${GITHUB_SHA::7}"
+          out="ds-visualizer-$version-android-universal.apk"
+          "$tools/zipalign" -f -p 4 "$unsigned" aligned.apk
+          "$tools/apksigner" sign --ks release.jks --ks-pass env:KEYSTORE_PASSWORD \
+            --ks-key-alias "$KEY_ALIAS" --key-pass env:KEYSTORE_PASSWORD --out "$out" aligned.apk
+          "$tools/apksigner" verify "$out"
+          rm release.jks
+          echo "APK=$out" >> "$GITHUB_ENV"
+
+      - if: env.IS_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "$APK" --clobber
+      - if: env.IS_RELEASE != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: android
+          path: ${{ env.APK }}
+
+  publish:
+    needs: [create-release, web, desktop, android]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/${{ needs.create-release.outputs.release_id }}" -F draft=false
