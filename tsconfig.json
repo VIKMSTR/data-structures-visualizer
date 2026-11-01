@@ -1,0 +1,21 @@
+{
+  "extends": "@tsconfig/svelte/tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2021",
+    // Compatibility guard: only ES2021 built-ins type-check. Newer APIs such as
+    // Array.prototype.at, Object.hasOwn or structuredClone-era helpers that older
+    // WebKit (Safari 15.0 / WebKitGTK) lacks become compile errors.
+    "lib": ["ES2021", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["vite/client"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noImplicitOverride": true,
+    "allowJs": false
+  },
+  "include": ["src/**/*.ts", "src/**/*.svelte"]
+}

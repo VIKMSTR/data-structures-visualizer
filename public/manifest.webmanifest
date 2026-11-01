@@ -1,0 +1,9 @@
+{
+  "name": "Data Structure Visualizer",
+  "short_name": "DS Viz",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#15181e",
+  "theme_color": "#2f6fde",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
