@@ -2,6 +2,7 @@
   import { onDestroy, untrack, type Snippet } from 'svelte';
   import type { Bounds } from '../core/layout';
   import { t } from '../i18n/index.svelte';
+  import { prefersReducedMotion } from '../motion';
   import Icon from './Icon.svelte';
 
   interface Props {
@@ -30,6 +31,11 @@
   let raf = 0;
   function animateTo(target: { k: number; x: number; y: number }, ms = 380) {
     cancelAnimationFrame(raf);
+    // The automatic re-fit is decoration, so it is the one thing that honours the OS setting.
+    if (prefersReducedMotion()) {
+      view = target;
+      return;
+    }
     const from = { ...view };
     const t0 = performance.now();
     const step = (now: number) => {

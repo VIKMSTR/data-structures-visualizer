@@ -8,9 +8,6 @@ const BASE_MS = 1000;
 /** Short pause after each step so the description can be read (the original had none). */
 const HOLD = 0.15;
 
-const reducedMotion =
-  typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
-
 /**
  * Plays a recorded list of steps with the semantics of the original AnimationControl:
  *  - stepping off: steps chain automatically; `back()` rewinds the whole operation;
@@ -40,9 +37,11 @@ export class Player<S> {
     return this.index <= 0;
   }
 
-  /** Duration of the movement into the current step. */
+  /** Duration of the movement into the current step.
+   *  Never zeroed by `prefers-reduced-motion`: the movement *is* the explanation
+   *  (the moving badge travelling to each compared node, see docs/original/bvs.md §2.3). */
   get tweenMs(): number {
-    return reducedMotion ? 0 : (BASE_MS * this.transitionPace) / this.speed;
+    return (BASE_MS * this.transitionPace) / this.speed;
   }
 
   load(steps: Step<S>[], opts: { autoplay?: boolean; toEnd?: boolean } = {}): void {
@@ -144,7 +143,7 @@ export class Player<S> {
 
   private schedule(): void {
     clearTimeout(this.timer);
-    const wait = reducedMotion ? 400 : this.tweenMs + (BASE_MS * HOLD * this.transitionPace) / this.speed;
+    const wait = this.tweenMs + (BASE_MS * HOLD * this.transitionPace) / this.speed;
     this.timer = setTimeout(() => this.advance(), wait);
   }
 }
